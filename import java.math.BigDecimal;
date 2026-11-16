@@ -1,0 +1,413 @@
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Scanner;
+import java.util.concurrent.atomic.AtomicLong;
+
+/** Sistema de console para cadastro e controle de estoque. */
+public class Main {
+	private static final Scanner INPUT = new Scanner(System.in);
+	private static final ProductRepository REPOSITORY = new ProductRepository();
+	private static final InventoryService INVENTORY = new InventoryService(REPOSITORY);
+	private static final DateTimeFormatter DATE_FORMAT =
+			DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss");
+
+	public static void main(String[] args) {
+		loadExamples();
+		System.out.println("========================================");
+		System.out.println("        CONTROLE DE ESTOQUE JAVA        ");
+		System.out.println("========================================");
+		boolean running = true;
+		while (running) {
+			showMenu();
+			int option = readInt("Escolha: ");
+			try {
+				switch (option) {
+					case 1 -> createProduct();
+					case 2 -> listProducts();
+					case 3 -> moveStock(true);
+					case 4 -> moveStock(false);
+					case 5 -> searchProduct();
+					case 6 -> listLowStock();
+					case 7 -> showReport();
+					case 8 -> showHistory();
+					case 0 -> running = false;
+					default -> System.out.println("Opção inválida.");
+				}
+			} catch (IllegalArgumentException | IllegalStateException ex) {
+				System.out.println("Erro: " + ex.getMessage());
+			}
+			if (running) {
+				System.out.print("\nPressione ENTER para continuar...");
+				INPUT.nextLine();
+			}
+		}
+		System.out.println("Programa encerrado.");
+	}
+
+	private static void showMenu() {
+		System.out.println("\n---------------- MENU ------------------");
+		System.out.println("1. Cadastrar produto");
+		System.out.println("2. Listar produtos");
+		System.out.println("3. Entrada de estoque");
+		System.out.println("4. Saída de estoque");
+		System.out.println("5. Buscar produto por código ou nome");
+		System.out.println("6. Ver produtos com estoque baixo");
+		System.out.println("7. Relatório geral");
+		System.out.println("8. Histórico de movimentações");
+		System.out.println("0. Sair");
+		System.out.println("----------------------------------------");
+	}
+
+	private static void loadExamples() {
+		REPOSITORY.save(new Product("Caderno universitário", "Papelaria", 25,
+				new BigDecimal("18.90"), 5));
+		REPOSITORY.save(new Product("Caneta azul", "Papelaria", 100,
+				new BigDecimal("2.50"), 20));
+		REPOSITORY.save(new Product("Garrafa térmica", "Acessórios", 12,
+				new BigDecimal("79.90"), 3));
+	}
+
+	private static void createProduct() {
+		System.out.println("\n--- Novo produto ---");
+		String name = readRequiredText("Nome: ");
+		String category = readRequiredText("Categoria: ");
+		int quantity = readInt("Quantidade inicial: ");
+		BigDecimal price = readMoney("Preço unitário: ");
+		int minimum = readInt("Estoque mínimo: ");
+		Product product = INVENTORY.createProduct(name, category, quantity, price, minimum);
+		System.out.println("Produto cadastrado com o código " + product.getId() + ".");
+	}
+
+	private static void listProducts() {
+		List<Product> products = REPOSITORY.findAll();
+		if (products.isEmpty()) {
+			System.out.println("Nenhum produto cadastrado.");
+			return;
+		}
+		printProductHeader();
+		products.stream().sorted(Comparator.comparingLong(Product::getId))
+				.forEach(Main::printProduct);
+	}
+
+	private static void searchProduct() {
+		String query = readRequiredText("Código ou parte do nome: ");
+		List<Product> matches;
+		try {
+			Optional<Product> product = REPOSITORY.findById(Long.parseLong(query));
+			matches = product.map(List::of).orElseGet(ArrayList::new);
+		} catch (NumberFormatException ex) {
+			matches = REPOSITORY.findByName(query);
+		}
+		if (matches.isEmpty()) {
+			System.out.println("Nenhum produto encontrado.");
+			return;
+		}
+		printProductHeader();
+		matches.forEach(Main::printProduct);
+	}
+
+	private static void moveStock(boolean incoming) {
+		long id = readLong("Código do produto: ");
+		int amount = readInt("Quantidade: ");
+		String note = readText("Observação (ENTER para nenhuma): ");
+		StockTransaction transaction = incoming
+				? INVENTORY.addStock(id, amount, note)
+				: INVENTORY.removeStock(id, amount, note);
+		int balance = REPOSITORY.findById(id).orElseThrow().getQuantity();
+		System.out.println("Movimentação " + transaction.getId()
+				+ " registrada. Saldo atual: " + balance + ".");
+	}
+
+	private static void listLowStock() {
+		List<Product> products = INVENTORY.findLowStock();
+		if (products.isEmpty()) {
+			System.out.println("Todos os produtos estão acima do estoque mínimo.");
+			return;
+		}
+		System.out.println("Produtos que precisam de reposição:");
+		printProductHeader();
+		products.forEach(Main::printProduct);
+	}
+
+	private static void showReport() {
+		InventoryReport report = INVENTORY.createReport();
+		System.out.println("\n------------- RELATÓRIO ---------------");
+		System.out.println("Produtos cadastrados: " + report.productCount);
+		System.out.println("Unidades em estoque:  " + report.totalUnits);
+		System.out.println("Produtos com estoque baixo: " + report.lowStockCount);
+		System.out.println("Valor estimado do estoque: " + formatMoney(report.stockValue));
+		System.out.println("----------------------------------------");
+	}
+
+	private static void showHistory() {
+		List<StockTransaction> history = INVENTORY.getTransactions();
+		if (history.isEmpty()) {
+			System.out.println("Nenhuma movimentação registrada.");
+			return;
+		}
+		System.out.println("\nID | DATA/HORA          | TIPO    | PRODUTO                 | QTD | NOTA");
+		System.out.println("--------------------------------------------------------------------------");
+		for (StockTransaction tx : history) {
+			String name = REPOSITORY.findById(tx.getProductId())
+					.map(Product::getName).orElse("Produto removido");
+			System.out.printf("%2d | %-18s | %-7s | %-23s | %3d | %s%n",
+					tx.getId(), DATE_FORMAT.format(tx.getDateTime()), tx.getType(),
+					shorten(name, 23), tx.getQuantity(), tx.getNote());
+		}
+	}
+
+	private static void printProductHeader() {
+		System.out.println("\nID | PRODUTO                  | CATEGORIA       | QTD | MÍN | PREÇO");
+		System.out.println("---------------------------------------------------------------------");
+	}
+
+	private static void printProduct(Product p) {
+		System.out.printf("%2d | %-24s | %-15s | %3d | %3d | %s%n",
+				p.getId(), shorten(p.getName(), 24), shorten(p.getCategory(), 15),
+				p.getQuantity(), p.getMinimumStock(), formatMoney(p.getUnitPrice()));
+	}
+
+	private static String shorten(String text, int limit) {
+		return text.length() <= limit ? text : text.substring(0, limit - 3) + "...";
+	}
+
+	private static String formatMoney(BigDecimal value) {
+		return "R$ " + value.setScale(2, RoundingMode.HALF_UP).toPlainString();
+	}
+
+	private static String readRequiredText(String prompt) {
+		while (true) {
+			System.out.print(prompt);
+			String value = INPUT.nextLine().trim();
+			if (!value.isEmpty()) return value;
+			System.out.println("Este campo é obrigatório.");
+		}
+	}
+
+	private static String readText(String prompt) {
+		System.out.print(prompt);
+		return INPUT.nextLine().trim();
+	}
+
+	private static int readInt(String prompt) {
+		while (true) {
+			System.out.print(prompt);
+			try {
+				return Integer.parseInt(INPUT.nextLine().trim());
+			} catch (NumberFormatException ex) {
+				System.out.println("Digite um número inteiro válido.");
+			}
+		}
+	}
+
+	private static long readLong(String prompt) {
+		while (true) {
+			System.out.print(prompt);
+			try {
+				return Long.parseLong(INPUT.nextLine().trim());
+			} catch (NumberFormatException ex) {
+				System.out.println("Digite um código numérico válido.");
+			}
+		}
+	}
+
+	private static BigDecimal readMoney(String prompt) {
+		while (true) {
+			System.out.print(prompt);
+			String value = INPUT.nextLine().trim().replace(',', '.');
+			try {
+				return new BigDecimal(value);
+			} catch (NumberFormatException ex) {
+				System.out.println("Digite um preço válido, como 19.90.");
+			}
+		}
+	}
+
+	static final class Product {
+		private long id;
+		private final String name;
+		private final String category;
+		private int quantity;
+		private final BigDecimal unitPrice;
+		private final int minimumStock;
+
+		Product(String name, String category, int quantity,
+				BigDecimal unitPrice, int minimumStock) {
+			if (name == null || name.trim().isEmpty())
+				throw new IllegalArgumentException("O nome é obrigatório.");
+			if (category == null || category.trim().isEmpty())
+				throw new IllegalArgumentException("A categoria é obrigatória.");
+			if (quantity < 0 || minimumStock < 0)
+				throw new IllegalArgumentException("As quantidades não podem ser negativas.");
+			if (unitPrice == null || unitPrice.signum() < 0)
+				throw new IllegalArgumentException("O preço não pode ser negativo.");
+			this.name = name.trim();
+			this.category = category.trim();
+			this.quantity = quantity;
+			this.unitPrice = unitPrice.setScale(2, RoundingMode.HALF_UP);
+			this.minimumStock = minimumStock;
+		}
+
+		long getId() { return id; }
+		String getName() { return name; }
+		String getCategory() { return category; }
+		int getQuantity() { return quantity; }
+		BigDecimal getUnitPrice() { return unitPrice; }
+		int getMinimumStock() { return minimumStock; }
+		boolean isLowStock() { return quantity <= minimumStock; }
+		void assignId(long value) { id = value; }
+		void setQuantity(int value) { quantity = value; }
+	}
+
+	static final class ProductRepository {
+		private final Map<Long, Product> products = new LinkedHashMap<>();
+		private final AtomicLong sequence = new AtomicLong(1);
+
+		Product save(Product product) {
+			product.assignId(sequence.getAndIncrement());
+			products.put(product.getId(), product);
+			return product;
+		}
+
+		Optional<Product> findById(long id) {
+			return Optional.ofNullable(products.get(id));
+		}
+
+		List<Product> findAll() {
+			return new ArrayList<>(products.values());
+		}
+
+		List<Product> findByName(String text) {
+			String query = text.toLowerCase();
+			List<Product> result = new ArrayList<>();
+			for (Product product : products.values()) {
+				if (product.getName().toLowerCase().contains(query)) result.add(product);
+			}
+			return result;
+		}
+	}
+
+	static final class StockTransaction {
+		enum Type { ENTRADA, SAIDA }
+
+		private final long id;
+		private final long productId;
+		private final Type type;
+		private final int quantity;
+		private final String note;
+		private final LocalDateTime dateTime;
+
+		StockTransaction(long id, long productId, Type type, int quantity, String note) {
+			this.id = id;
+			this.productId = productId;
+			this.type = type;
+			this.quantity = quantity;
+			this.note = note.isEmpty() ? "-" : note;
+			this.dateTime = LocalDateTime.now();
+		}
+
+		long getId() { return id; }
+		long getProductId() { return productId; }
+		Type getType() { return type; }
+		int getQuantity() { return quantity; }
+		String getNote() { return note; }
+		LocalDateTime getDateTime() { return dateTime; }
+	}
+
+	static final class InventoryReport {
+		final int productCount;
+		final int totalUnits;
+		final int lowStockCount;
+		final BigDecimal stockValue;
+
+		InventoryReport(int productCount, int totalUnits, int lowStockCount,
+						BigDecimal stockValue) {
+			this.productCount = productCount;
+			this.totalUnits = totalUnits;
+			this.lowStockCount = lowStockCount;
+			this.stockValue = stockValue;
+		}
+	}
+
+	static final class InventoryService {
+		private final ProductRepository repository;
+		private final List<StockTransaction> transactions = new ArrayList<>();
+		private final AtomicLong transactionSequence = new AtomicLong(1);
+
+		InventoryService(ProductRepository repository) {
+			this.repository = repository;
+		}
+
+		Product createProduct(String name, String category, int quantity,
+							  BigDecimal price, int minimumStock) {
+			return repository.save(new Product(name, category, quantity, price, minimumStock));
+		}
+
+		StockTransaction addStock(long productId, int amount, String note) {
+			Product product = requireProduct(productId);
+			validateAmount(amount);
+			product.setQuantity(Math.addExact(product.getQuantity(), amount));
+			return record(productId, StockTransaction.Type.ENTRADA, amount, note);
+		}
+
+		StockTransaction removeStock(long productId, int amount, String note) {
+			Product product = requireProduct(productId);
+			validateAmount(amount);
+			if (amount > product.getQuantity())
+				throw new IllegalStateException("Estoque insuficiente. Disponível: "
+						+ product.getQuantity() + ".");
+			product.setQuantity(product.getQuantity() - amount);
+			return record(productId, StockTransaction.Type.SAIDA, amount, note);
+		}
+
+		List<Product> findLowStock() {
+			List<Product> result = new ArrayList<>();
+			for (Product product : repository.findAll()) {
+				if (product.isLowStock()) result.add(product);
+			}
+			return result;
+		}
+
+		InventoryReport createReport() {
+			int units = 0;
+			BigDecimal value = BigDecimal.ZERO;
+			List<Product> products = repository.findAll();
+			for (Product product : products) {
+				units = Math.addExact(units, product.getQuantity());
+				value = value.add(product.getUnitPrice()
+						.multiply(BigDecimal.valueOf(product.getQuantity())));
+			}
+			return new InventoryReport(products.size(), units, findLowStock().size(), value);
+		}
+
+		List<StockTransaction> getTransactions() {
+			return new ArrayList<>(transactions);
+		}
+
+		private Product requireProduct(long id) {
+			return repository.findById(id)
+					.orElseThrow(() -> new IllegalArgumentException("Produto não encontrado."));
+		}
+
+		private void validateAmount(int amount) {
+			if (amount <= 0)
+				throw new IllegalArgumentException("A quantidade deve ser maior que zero.");
+		}
+
+		private StockTransaction record(long productId, StockTransaction.Type type,
+										int amount, String note) {
+			StockTransaction tx = new StockTransaction(transactionSequence.getAndIncrement(),
+					productId, type, amount, note);
+			transactions.add(tx);
+			return tx;
+		}
+	}
+}
